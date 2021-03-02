@@ -1,0 +1,385 @@
+version: "3.7"
+
+configs:
+  klocwork-admin-conf:
+    file: ./klocwork/admin.conf
+  klocwork-credential:
+    file: ./klocwork/credential
+  sonar-properties:
+    file: ./sonarqube/sonar.properties
+
+networks:
+  grafana:
+  sonarqube:
+  traefik_net:
+    name: traefik_net
+  portainer_agent:
+    driver: overlay
+    attachable: true
+
+secrets:
+  cluster.key:
+    external: true
+  cluster.crt:
+    external: true
+  POCCQ02S_PASS:
+    name: POCCQ02S_PASS_V2
+    external: true
+  siemens-ca.cer:
+    name: siemens-ca-v3-2016
+    external: true
+  ldap-siemens-ca.cer:
+    name: ldap-siemens-ca-shdxrd-2019
+    external: true
+  sonar-token:
+    name: sonar-token-v2
+    external: true
+  poctarobot-pass:
+    name: poctarobot-pass-v1
+    external: true
+
+
+volumes:
+  portainer_data:
+  postgresql_data:
+  sonarqube_data:
+  prometheus_data:
+  grafana_data:
+  sonarqube_extensions:
+  traefik_acme:
+  traefik_logs:
+  jenkins_home:
+  klocwork_pr:
+  lattix_repo:
+
+services:
+  traefik:
+    image: usndea0poc20v0.onehc.net/docker/library/traefik:1.7.6
+    command: |-
+      --entryPoints="Name:http Address::80"
+      --entryPoints="Name:http-8000 Address::8000"
+      --entryPoints="Name:https Address::443 TLS:/run/secrets/cluster.crt,/run/secrets/cluster.key"
+      --entryPoints="Name:https-8443 Address::8443 TLS:/run/secrets/cluster.crt,/run/secrets/cluster.key"
+      --defaultentrypoints="http,https"
+      --api
+      --docker
+      --docker.swarmmode
+      # Change this to your primary domain
+      --docker.domain="usndea0lnx0v01.onehc.net"
+      --docker.watch
+      --web
+
+      # --traefikLog.format=json
+      # --accessLog.format=json
+    ports:
+      - 80:80
+      - 8000:8000
+      - 8080:8080
+      - 443:443
+      # - 7443:7443
+      - 8443:8443
+    networks:
+      - traefik_net
+    secrets:
+      - cluster.key
+      - cluster.crt
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        traefik.frontend.rule: 'PathPrefixStrip: /traefik'
+        traefik.port: 8080
+        traefik.docker.network: 'traefik_net'
+    # logging:
+    #   driver: fluentd
+
+  portainer-agent:
+    image: usndea0poc20v0.onehc.net/docker/portainer/agent:1.2.0
+    environment:
+      # REQUIRED: Should be equal to the service name prefixed by "tasks." when
+      # deployed inside an overlay network
+      AGENT_CLUSTER_ADDR: tasks.portainer-agent
+      # AGENT_PORT: 9001
+      # LOG_LEVEL: debug
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - portainer_agent
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.platform.os == linux]
+
+  portainer:
+    image: usndea0poc20v0.onehc.net/docker/portainer/portainer:1.20.0
+    command: -H tcp://tasks.portainer-agent:9001 --tlsskipverify
+    volumes:
+      - portainer_data:/data
+    networks:
+      - portainer_agent
+      - traefik_net
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        traefik.frontend.redirect.regex: '^(.*)/portainer$$'
+        traefik.frontend.redirect.replacement: '$$1/portainer/'
+        traefik.frontend.rule: 'PathPrefix:/portainer;ReplacePathRegex: ^/portainer/(.*) /$$1'
+        traefik.port: 9000
+        traefik.docker.network: 'traefik_net'
+
+  jenkins:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/jenkins:2.259.SB
+    environment:
+      - JENKINS_OPTS=--prefix=/jenkins
+      - TFS_POC1_URL=https://manitou.healthcare.siemens.com/tfs/POC1
+      - TFS_EPOC_URL=https://manitou.healthcare.siemens.com/tfs/Epocal
+      - TFS_POC1_USER=POCCQ02S
+      - PLUGINS_FORCE_UPGRADE=true
+    networks:
+      - traefik_net
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    ports:
+      # the jenkins agent port
+      - 50000:50000
+    secrets:
+      - POCCQ02S_PASS
+      - poctarobot-pass
+      - siemens-ca.cer
+      - ldap-siemens-ca.cer
+      - sonar-token
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        traefik.frontend.rule: 'PathPrefix: /jenkins'
+        traefik.port: 8080
+        traefik.docker.network: 'traefik_net'
+  grafana:
+    image: grafana/grafana:6.4.3
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/grafana
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=CodeQuality
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - http_proxy=usndea0lnx0v01.onehc.net:3128
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,vonage-status-panel
+    networks:
+      - grafana
+      - traefik_net
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: PathPrefixStrip:/grafana
+        traefik.port: 3000
+        traefik.docker.network: 'traefik_net'
+  sonarqube:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/sonarqube:7.1.1.SB
+    command: |-
+      /run/secrets/POCCQ02S_PASS
+      /run/secrets/ldap-siemens-ca.cer
+      -Dsonar.web.context=/sonarqube
+    environment:
+      - SONARQUBE_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar
+      - SONARQUBE_JDBC_USERNAME=sonarqube
+      - SONARQUBE_JDBC_PASSWORD=SonarQubePassword
+    networks:
+      - sonarqube
+      - traefik_net
+    configs:
+      - source: sonar-properties
+        target: /sonar.properties
+        mode: 0666 # make it writeable by user
+    secrets:
+      - POCCQ02S_PASS
+      - ldap-siemens-ca.cer
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        # traefik.frontend.entryPoints: http,https
+        traefik.http.redirect: https
+        traefik.frontend.rule: 'PathPrefix: /sonarqube'
+        traefik.port: 9000
+        traefik.docker.network: 'traefik_net'
+  sonarqube-db:
+    image: usndea0poc20v0.onehc.net/docker/library/postgres:11.1
+    hostname: sonarqube-db
+    environment:
+      - POSTGRES_USER=sonar
+      - POSTGRES_PASSWORD=sonar
+    networks:
+      - sonarqube
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    # logging:
+    #   driver: fluentd
+
+  klocwork:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/klocwork-full:20.4.0.75.SB
+    environment:
+      - KLOCWORK_HOST=localhost
+      - KLOCWORK_PORT=8080
+      - DATABASE_HOST=localhost
+      - LICENSE_HOST=usndea0lnx0v01.onehc.net
+      - LICENSE_PORT=27000
+    networks:
+      - traefik_net
+    configs:
+      - source: klocwork-admin-conf
+        target: /admin.conf
+        mode: 0666
+      - source: klocwork-credential
+        target: /credential
+        mode: 0666
+    secrets:
+      - ldap-siemens-ca.cer
+    volumes:
+      - klocwork_pr:/opt/klocwork/projects_root
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.entryPoints: https-8443,http-8000
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        traefik.frontend.rule: 'PathPrefix: /'
+        traefik.port: 8080
+        traefik.docker.network: 'traefik_net'
+  prometheus:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/prometheus:v2.13.0
+    volumes:
+      - ./prometheus/conf:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.external-url=/prometheus'
+      - '--web.enable-lifecycle'
+      - '--web.console.templates="consoles'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=24h'
+    networks:
+      - grafana
+      - traefik_net
+    labels:
+      org.label-schema.group: "monitoring"
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'Host: usndea0lnx0v01.onehc.net'
+        traefik.frontend.rule: 'PathPrefix: /prometheus'
+        traefik.port: 9090
+        traefik.docker.network: 'traefik_net'
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - grafana
+    deploy:
+      mode: global
+      restart_policy:
+          condition: on-failure
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command: 
+      - '--path.procfs=/host/proc' 
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    networks:
+      - grafana
+    deploy:
+      mode: global
+      restart_policy:
+          condition: on-failure
+  alertmanager:
+    image: prom/alertmanager
+    volumes:
+      - "./alertmanager/:/etc/alertmanager/"
+    networks:
+      - grafana
+      - traefik_net
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.route-prefix=/alertmanager'
+      - '--log.level=debug'
+    deploy:
+      placement:
+        constraints:
+           - node.role==manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        traefik.enable: "true"
+        traefik.frontend.rule: 'PathPrefix: /alertmanager'
+        traefik.port: 9093
+        traefik.docker.network: 'traefik_net'
+  tau-exporter:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/tau-exporter:v0.2.4
+    networks:
+      - grafana
+    ports:
+      - 8092:8092
+        
+  ansible:
+    image: usndea0poc20v0.onehc.net/docker/hcpoc/ansible:2.10.5.SB 
+    
+
+#  lattix:
+#    image: usndea0poc20v0.onehc.net/docker/lattix-web:11.4-190308.SB
+#    networks:
+#      - traefik_net
+#    volumes:
+#      - lattix_repo:/home/lattixweb/LattixRepository
+#    deploy:
+#      labels:
+#        traefik.enable: "true"
+#        traefik.frontend.rule: 'Host: usndea0lnx0v00.onehc.net'
+#        traefik.frontend.rule: 'PathPrefix: /LattixWeb'
+#        traefik.port: 8080
+#        traefik.docker.network: 'traefik_net'
+
+#  confluence:
+#    image: usndea0poc20v0.onehc.net/docker/hcpoc/confluence-server:6.9.3-alpine-adoptopenjdk8.SB
+#    environment:
+#      - CATALINA_CONNECTOR_PROXYNAME=usndea0lnx0v00.onehc.net
+#      - CATALINA_CONNECTOR_PROXYPORT=443
+#      - CATALINA_CONTEXT_PATH=/confluence
+#      - CATALINA_CONNECTOR_SCHEME=https
+#      - CATALINA_CONNECTOR_SECURE=true
+#    networks:
+#      - traefik_net
+#    ports:
+#      - 8090:8090
+#    deploy:
+#      labels:
+#        traefik.enable: "true"
+#        traefik.frontend.rule: 'Host: usndea0lnx0v00.onehc.net'
+#        traefik.frontend.rule: 'PathPrefix: /confluence'
+#        traefik.port: 8090
+#        traefik.docker.network: 'traefik_net'

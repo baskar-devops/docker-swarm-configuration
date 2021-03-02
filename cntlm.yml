@@ -1,0 +1,24 @@
+version: "3.7"
+
+secrets:
+  Z003TXWT_PASS:
+    name: Z003TXWT_PASS_V1
+    external: true
+
+services:
+  cntlm:
+    image: usndea0poc20v0.onehc.net/docker-local/hcpoc/cntlm:1.0
+    ports:
+      - 3128:3128
+    secrets:
+      - Z003TXWT_PASS
+    command: |-
+      z003txwt
+      SH01
+      proxy.sh01.shdxrd.net:8080
+      /run/secrets/Z003TXWT_PASS
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager

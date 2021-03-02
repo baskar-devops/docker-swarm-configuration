@@ -1,0 +1,40 @@
+version: "3.7"
+
+networks:
+  es_net:
+    driver: overlay
+
+services:
+  elasticsearch:
+    image: usndea0poc20v0.onehc.net/docker/library/elasticsearch:6.5.4
+    environment:
+      - cluster.name=docker-cluster
+      - bootstrap.memory_lock=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    # volumes:
+    #   - esdata1:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+    networks:
+      - es_net
+  
+  kibana:
+    image: usndea0poc20v0.onehc.net/docker/library/kibana:6.5.4
+    # environment:
+    #   - SERVER_BASEPATH=/kibana
+    ports:
+      - 5601:5601
+    networks:
+      - es_net
+  
+  fluent-bit:
+    image: usndea0poc20v0.onehc.net/docker/pocdevops/fluent-bit:1.0.2
+    environment:
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+    ports:
+      - 24224:24224
+    networks:
+      - es_net
+    deploy:
+      mode: global
